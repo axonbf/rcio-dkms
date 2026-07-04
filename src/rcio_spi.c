@@ -6,6 +6,22 @@
 #include "rcio.h"
 #include "protocol.h"
 
+/* CS timing delays — configurable via module parameters.
+ * Defaults to 0 (safe for Pi 4). Pi 5 passes values via insmod:
+ *   insmod rcio_spi.ko cs_setup_us=50 cs_hold_us=50 cs_inactive_us=500
+ */
+static int cs_setup_us = 0;
+module_param(cs_setup_us, int, 0644);
+MODULE_PARM_DESC(cs_setup_us, "CS setup delay in microseconds (default 0, Pi 5: 50)");
+
+static int cs_hold_us = 0;
+module_param(cs_hold_us, int, 0644);
+MODULE_PARM_DESC(cs_hold_us, "CS hold delay in microseconds (default 0, Pi 5: 50)");
+
+static int cs_inactive_us = 0;
+module_param(cs_inactive_us, int, 0644);
+MODULE_PARM_DESC(cs_inactive_us, "CS inactive delay in microseconds (default 0, Pi 5: 500)");
+
 static struct IOPacket *buffer;
 
 static int wait_complete(struct spi_device *spi)
@@ -128,6 +144,22 @@ static int rcio_spi_probe(struct spi_device *spi)
     int ret;
     spi->mode = SPI_MODE_0;
     spi->max_speed_hz = 4000000;
+
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(6,2,0)
+    if (cs_setup_us > 0 || cs_hold_us > 0 || cs_inactive_us > 0) {
+        spi->cs_setup.unit    = SPI_DELAY_UNIT_USECS;
+        spi->cs_setup.value   = cs_setup_us;
+        spi->cs_hold.unit     = SPI_DELAY_UNIT_USECS;
+        spi->cs_hold.value    = cs_hold_us;
+        spi->cs_inactive.unit = SPI_DELAY_UNIT_USECS;
+        spi->cs_inactive.value = cs_inactive_us;
+    }
+    dev_info(&spi->dev, "rcio_spi setup mode=0x%x max_speed_hz=%u cs_setup=%dus cs_hold=%dus inter_xfer=%dus\n",
+             spi->mode, spi->max_speed_hz, cs_setup_us, cs_hold_us, cs_inactive_us);
+#else
+    dev_info(&spi->dev, "rcio_spi setup mode=0x%x max_speed_hz=%u\n",
+             spi->mode, spi->max_speed_hz);
+#endif
 
     ret = spi_setup(spi);
 

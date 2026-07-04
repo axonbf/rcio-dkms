@@ -1,0 +1,27 @@
+// RCIO device tree overlay for Raspberry Pi 5
+// Pi 5 uses RP1 SPI1 controller at /axi/pcie@120000/rp1/spi@54000
+// Use this overlay instead of rcio-overlay.dts on Pi 5:
+//   dtoverlay=spi1-1cs,cs0_pin=16,cs0_spidev=disabled
+//   dtoverlay=rcio-pi5
+/dts-v1/;
+/plugin/;
+
+/ {
+        compatible = "brcm,bcm2712";
+
+        fragment@0 {
+                target = <&spi1>;
+                __overlay__ {
+                        #address-cells = <1>;
+                        #size-cells = <0>;
+                        status = "okay";
+
+                        rcio@0 {
+                                compatible = "rcio";
+                                spi-max-frequency = <4000000>;
+                                reg = <0>;
+                                status = "okay";
+                        };
+                };
+        };
+};

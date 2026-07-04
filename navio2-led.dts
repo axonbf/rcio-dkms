@@ -1,0 +1,41 @@
+// Navio2 RGB LED device tree overlay for Raspberry Pi 5
+// Creates /sys/class/leds/rgb_led0 (Red=GPIO4), rgb_led1 (Blue=GPIO6), rgb_led2 (Green=GPIO27)
+// These are consumed by ArduPilot's Led_Sysfs driver for status indication.
+/dts-v1/;
+/plugin/;
+
+/ {
+    compatible = "brcm,bcm2712";
+
+    fragment@0 {
+        target-path = "/";
+
+        __overlay__ {
+            navio2-leds {
+                compatible = "gpio-leds";
+                status = "okay";
+
+                rgb_led0 {
+                    label = "rgb_led0";
+                    gpios = <&gpio 4 0>;
+                    linux,default-trigger = "none";
+                    default-state = "off";
+                };
+
+                rgb_led1 {
+                    label = "rgb_led1";
+                    gpios = <&gpio 6 0>;
+                    linux,default-trigger = "none";
+                    default-state = "off";
+                };
+
+                rgb_led2 {
+                    label = "rgb_led2";
+                    gpios = <&gpio 27 0>;
+                    linux,default-trigger = "none";
+                    default-state = "off";
+                };
+            };
+        };
+    };
+};

@@ -9,7 +9,14 @@
 
 //#define DEBUG
 
-#define GPIO_CHIP_OFFSET 500
+/* Use dynamic GPIO base allocation (-1). The kernel automatically picks
+ * a free range, avoiding conflicts with platform GPIO controllers.
+ * On Pi 4, the kernel assigns a base near 500. On Pi 5, the kernel
+ * assigns a base after the RP1 GPIO chips (625+).
+ * The original hardcoded base 500 caused -EBUSY on Pi 5 because
+ * RP1's gpio-brcmstb starts at base 512.
+ */
+#define GPIO_CHIP_OFFSET -1
 #define GPIO_PIN_OFFSET 0
 
 #define rcio_gpio_err(__dev, format, args...)\
