@@ -155,14 +155,14 @@ static int rcio_init(struct rcio_adapter *adapter)
 
     return 0;
 
-errout_status:
-errout_safety:
-errout_rcin:
-    rcio_pwm_remove(&rcio_state);
 errout_gpio:
     rcio_gpio_remove(&rcio_state);
+errout_safety:
+errout_rcin:
 errout_pwm:
+    rcio_pwm_remove(&rcio_state);
 errout_adc:
+errout_status:
     kobject_put(rcio_state.object);
     return -EIO;
 }
@@ -200,7 +200,6 @@ int rcio_remove(struct rcio_adapter *adapter)
     return ret;
 }
 
-EXPORT_SYMBOL_GPL(rcio_state);
 EXPORT_SYMBOL_GPL(rcio_probe);
 EXPORT_SYMBOL_GPL(rcio_remove);
 

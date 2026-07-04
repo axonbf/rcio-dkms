@@ -10,6 +10,8 @@
 
 #define PERIOD_MIN_NS 2040816
 
+#define inside_range(x, lower, upper) ((x >= lower) && (x <= upper))
+
 #define rcio_pwm_err(__dev, format, args...)\
         dev_err(__dev, "rcio_pwm: " format, ##args)
 #define rcio_pwm_err_ratelimited(__dev, format, args...)\
@@ -42,15 +44,21 @@ struct pwm_output_rc_config {
 };
 
 struct rcio_pwm *pwm;
+static bool pwm_registered;
 
 static int rcio_pwm_safety_off(struct rcio_state *state);
 static int pwm_set_initial_rc_config(struct rcio_state *state);
 
-static int rcio_pwm_enable(struct pwm_chip *chip, struct pwm_device *pwm);
-static void rcio_pwm_disable(struct pwm_chip *chip, struct pwm_device *pwm);
-static int rcio_pwm_config(struct pwm_chip *chip, struct pwm_device *pwm, int duty_ns, int period_ns);
+static int rcio_pwm_apply(struct pwm_chip *chip, struct pwm_device *pwm, const struct pwm_state *state);
+static int rcio_pwm_get_state(struct pwm_chip *chip, struct pwm_device *pwm, struct pwm_state *state);
 static int rcio_pwm_request(struct pwm_chip *chip, struct pwm_device *pwm);
 static void rcio_pwm_free(struct pwm_chip *chip, struct pwm_device *pwm);
+
+static bool is_pwm_ignored(int channel);
+static bool rcio_pwm_should_change_freq_new_way(struct pwm_chip *chip, struct pwm_device *channel, int pwm_group_number, u16 new_frequency);
+static bool rcio_pwm_should_change_duty_new_way(struct pwm_chip *chip, struct pwm_device *channel, int pwm_group_number, u16 new_frequency);
+static bool rcio_pwm_should_change_freq_old_way(struct pwm_chip *chip, struct pwm_device *channel, u16 new_frequency, int duty_ns);
+static bool rcio_pwm_should_change_duty_old_way(struct pwm_chip *chip, struct pwm_device *channel, u16 new_frequency);
 
 static int rcio_pwm_create_sysfs_handle(struct rcio_state *state);
 
@@ -63,9 +71,8 @@ struct rcio_pwm {
 };
 
 static const struct pwm_ops rcio_pwm_ops = {
-    .enable = rcio_pwm_enable,
-    .disable = rcio_pwm_disable,
-    .config = rcio_pwm_config,
+    .apply = rcio_pwm_apply,
+    .get_state = rcio_pwm_get_state,
     .request = rcio_pwm_request,
     .free = rcio_pwm_free,
     .owner = THIS_MODULE,
@@ -301,20 +308,23 @@ int rcio_pwm_probe(struct rcio_state *state)
 
 int rcio_pwm_remove(struct rcio_state *state)
 {
-    int ret;
+    if (!pwm)
+        return 0;
 
-    ret = pwmchip_remove(&pwm->chip);
-
-    if (ret < 0)
-        return ret;
+    if (pwm_registered)
+        pwmchip_remove(&pwm->chip);
 
     kfree(pwm);
+    pwm = NULL;
+    pwm_registered = false;
 
     return 0;
 }
 
 static int rcio_pwm_create_sysfs_handle(struct rcio_state *state)
 {
+    int ret;
+
     pwm = kzalloc(sizeof(struct rcio_pwm), GFP_KERNEL);
 
     if (!pwm)
@@ -328,21 +338,90 @@ static int rcio_pwm_create_sysfs_handle(struct rcio_state *state)
     pwm->chip.dev = state->adapter->dev;
     pwm->state = state;
 
-    return pwmchip_add(&pwm->chip);
-}
+    ret = pwmchip_add(&pwm->chip);
+    if (ret < 0) {
+        kfree(pwm);
+        pwm = NULL;
+        return ret;
+    }
 
-static int rcio_pwm_enable(struct pwm_chip *chip, struct pwm_device *pwm)
-{
-    armed = true;
-
+    pwm_registered = true;
     return 0;
 }
 
-static void rcio_pwm_disable(struct pwm_chip *chip, struct pwm_device *pwm_dev)
+static int rcio_pwm_get_state(struct pwm_chip *chip, struct pwm_device *pwm_dev, struct pwm_state *state)
 {
-    values[pwm_dev->hwpwm] = 0;
-    rcio_pwm_force_update_pin(pwm->state, pwm_dev->hwpwm);
-    armed = false;
+    state->period = 20000000;
+    state->duty_cycle = values[pwm_dev->hwpwm] * 1000;
+    state->polarity = PWM_POLARITY_NORMAL;
+    state->enabled = armed;
+    return 0;
+}
+
+static int rcio_pwm_apply(struct pwm_chip *chip, struct pwm_device *channel, const struct pwm_state *state)
+{
+    u16 duty_ms;
+    u16 new_frequency;
+    int pwm_group_number = 0;
+    int period_ns = state->period;
+    int duty_ns = state->duty_cycle;
+
+    if (!state->enabled) {
+        values[channel->hwpwm] = 0;
+        rcio_pwm_force_update_pin(pwm->state, channel->hwpwm);
+        armed = false;
+        return 0;
+    }
+
+    armed = true;
+
+    if ((pwm_ignore_writings_mask && is_pwm_ignored(channel->hwpwm) && (duty_ns != 0)) ||
+        ((force_pwmzero_countdown > 0) && (channel->hwpwm < RCIO_PWM_MAX_ZEROED_CHANNELS))) {
+        values[channel->hwpwm] = 0;
+        return 0;
+    }
+
+    armtimeout = jiffies + HZ / 10;
+    new_frequency = 1000000000 / period_ns;
+
+    if (adv_timer_config_supported) {
+        if (inside_range(channel->hwpwm, 0, 3)) pwm_group_number = 0;
+        if (inside_range(channel->hwpwm, 4, 7)) pwm_group_number = 1;
+        if (inside_range(channel->hwpwm, 8, 11)) pwm_group_number = 2;
+        if (inside_range(channel->hwpwm, 12, 15)) pwm_group_number = 3;
+
+        if (rcio_pwm_should_change_freq_new_way(chip, channel, pwm_group_number, new_frequency)) {
+            new_frequencies[pwm_group_number] = new_frequency;
+            rcio_pwm_warn(pwm->chip.dev, "requested update on %d to %d", pwm_group_number, new_frequency);
+            frequencies_update_required[pwm_group_number] = true;
+        }
+
+        if (rcio_pwm_should_change_duty_new_way(chip, channel, pwm_group_number, new_frequency)) {
+            duty_ms = duty_ns / 1000;
+            values[channel->hwpwm] = duty_ms;
+        } else {
+            values[channel->hwpwm] = 0;
+        }
+
+    } else {
+        if (rcio_pwm_should_change_freq_old_way(chip, channel, new_frequency, duty_ns)) {
+            if (channel->hwpwm < 8) {
+                alt_frequency = new_frequency;
+                alt_frequency_updated = true;
+            } else {
+                default_frequency = new_frequency;
+                default_frequency_updated = true;
+            }
+        }
+
+        if (rcio_pwm_should_change_duty_old_way(chip, channel, new_frequency)) {
+            duty_ms = duty_ns / 1000;
+            values[channel->hwpwm] = duty_ms;
+        } else {
+            values[channel->hwpwm] = 0;
+        }
+    }
+    return 0;
 }
 
 static void print_freqs_error(void) {
@@ -446,68 +525,6 @@ static bool is_pwm_ignored(int channel) {
     return ((pwm_ignore_writings_mask) >> channel) & 0x01;
 }
 
-static int rcio_pwm_config(struct pwm_chip *chip, struct pwm_device *channel, int duty_ns, int period_ns)
-{
-    u16 duty_ms;
-    u16 new_frequency;
-    int pwm_group_number = 0;
-
-    if ((pwm_ignore_writings_mask && is_pwm_ignored(channel->hwpwm) && (duty_ns != 0)) ||
-		((force_pwmzero_countdown > 0) && (channel->hwpwm < RCIO_PWM_MAX_ZEROED_CHANNELS))) {
-        //rcio_pwm_err(pwm->chip.dev, "pin %d is ignored for writing %d", channel->hwpwm, duty_ns);
-        values[channel->hwpwm] = 0;
-        return 0;
-    }
-
-    armtimeout = jiffies + HZ / 10; /* timeout in 0.1s */
-    new_frequency = 1000000000 / period_ns;
-    
-    if (adv_timer_config_supported) {
-        //new way
-
-        if (inside_range(channel->hwpwm, 0, 3)) pwm_group_number = 0;
-        if (inside_range(channel->hwpwm, 4, 7)) pwm_group_number = 1;
-        if (inside_range(channel->hwpwm, 8, 11)) pwm_group_number = 2;
-        if (inside_range(channel->hwpwm, 12, 15)) pwm_group_number = 3;
-
-        if (rcio_pwm_should_change_freq_new_way(chip, channel, pwm_group_number, new_frequency)) {
-            new_frequencies[pwm_group_number] = new_frequency;
-            rcio_pwm_warn(pwm->chip.dev, "requested update on %d to %d", pwm_group_number, new_frequency);
-            frequencies_update_required[pwm_group_number] = true;     
-        }
-        
-        if (rcio_pwm_should_change_duty_new_way(chip, channel, pwm_group_number, new_frequency)) {
-			duty_ms = duty_ns / 1000;
-            values[channel->hwpwm] = duty_ms;       
-        } else {
-			//change is not safe, better to force duty to zero
-			values[channel->hwpwm] = 0;
-        }
-        
-    } else {
-        //old way
-
-		if (rcio_pwm_should_change_freq_old_way(chip, channel, new_frequency, duty_ns)) {
-			if (channel->hwpwm < 8) {
-				alt_frequency = new_frequency;
-				alt_frequency_updated = true;
-			} else {
-				default_frequency = new_frequency;
-				default_frequency_updated = true;
-			}
-        }
-
-		if (rcio_pwm_should_change_duty_old_way(chip, channel, new_frequency)) {
-			duty_ms = duty_ns / 1000;
-			values[channel->hwpwm] = duty_ms;       
-		} else {
-			//change is not safe, better to force duty to zero
-			values[channel->hwpwm] = 0;
-		}
-    }
-    return 0;
-}
-
 static int rcio_pwm_request(struct pwm_chip *chip, struct pwm_device *pwm_dev)
 {
     uint16_t pwm_exported, gpio_exported;
@@ -523,9 +540,10 @@ static int rcio_pwm_request(struct pwm_chip *chip, struct pwm_device *pwm_dev)
     }
 
     if (pwm_running < 0) {
-        //we've got some error. let's passthrough it
-        return pwm_running;
-    } else if (pwm_running > 0) {
+        rcio_pwm_warn(pwm->state->adapter->dev, "Exporting warning: pwm running count unavailable, assuming outputs are stopped\n");
+        pwm_running = 0;
+    }
+    if (pwm_running > 0) {
 
         //some of motors are running now. we are not allowed to change pin configuration now.
         rcio_pwm_err(pwm->state->adapter->dev, "Exporting error: you have some of PWM outputs running. Stop them to change pin configuration.\n");
@@ -548,6 +566,9 @@ static int rcio_pwm_request(struct pwm_chip *chip, struct pwm_device *pwm_dev)
     } else {
         //this pin is not stated, lets export it
         ret = (pwm->state->register_get(pwm->state, PX4IO_PAGE_PWM_EXPORTED, 0, &pwm_exported, 1));
+        if (ret < 0) {
+            return ret;
+        }
         pwm_exported |= (1 << pin_number);
         ret = (pwm->state->register_set(pwm->state, PX4IO_PAGE_PWM_EXPORTED, 0, &pwm_exported, 1));
 
