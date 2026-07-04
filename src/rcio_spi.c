@@ -1,5 +1,6 @@
 #include <linux/delay.h>
 #include <linux/module.h>
+#include <linux/version.h>
 #include <linux/spi/spi.h>
 
 #include "rcio.h"
@@ -17,7 +18,7 @@ static int wait_complete(struct spi_device *spi)
     usleep_range(120, 150);
 
     ret = spi_write_then_read(spi, (char *) buffer, sizeof(struct IOPacket), NULL, 0);
-    
+
     if (ret < 0)
         return ret;
 
@@ -50,10 +51,8 @@ static int rcio_spi_write(struct rcio_adapter *state, u16 address, const char *d
     for (unsigned i = count; i < PKT_MAX_REGS; i++)
         buffer->regs[i] = 0x55aa;
 
-    /* start the transaction and wait for it to complete */
     result = wait_complete(spi);
 
-    /* successful transaction? */
     if (result == 0) {
         uint8_t crc = buffer->crc;
         buffer->crc = 0;
@@ -63,12 +62,11 @@ static int rcio_spi_write(struct rcio_adapter *state, u16 address, const char *d
         } else if (PKT_CODE(*buffer) == PKT_CODE_ERROR) {
             result = -EINVAL;
         }
-
     }
 
     if (result == 0)
         result = count;
-        
+
     mutex_unlock(&state->lock);
 
     return result;
@@ -91,36 +89,30 @@ static int rcio_spi_read(struct rcio_adapter *state, u16 address, char *data, si
     buffer->page = page;
     buffer->offset = offset;
 
-    /* start the transaction and wait for it to complete */
     result = wait_complete(spi);
 
-    /* successful transaction? */
     if (result == 0) {
         uint8_t crc = buffer->crc;
         buffer->crc = 0;
 
         if (crc != crc_packet(buffer)) {
             result = -EIO;
-
-        /* check result in packet */
+            dev_warn(&spi->dev,
+                     "rcio_spi_read crc error page=%u offset=%u count=%zu code=0x%02x\n",
+                     page, offset, count, PKT_CODE(*buffer));
         } else if (PKT_CODE(*buffer) == PKT_CODE_ERROR) {
-
-            /* IO didn't like it - no point retrying */
             result = -EINVAL;
-
-        /* compare the received count with the expected count */
+            dev_warn(&spi->dev,
+                     "rcio_spi_read error reply page=%u offset=%u count=%zu\n",
+                     page, offset, count);
         } else if (PKT_COUNT(*buffer) != count) {
-
-            /* IO returned the wrong number of registers - no point retrying */
             result = -EIO;
-
-        /* successful read */
+            dev_warn(&spi->dev,
+                     "rcio_spi_read count mismatch page=%u offset=%u expected=%zu got=%u\n",
+                     page, offset, count, PKT_COUNT(*buffer));
         } else {
-
-            /* copy back the result */
             memcpy(values, &buffer->regs[0], (2 * count));
         }
-
     }
 
     if (result == 0)
@@ -135,6 +127,7 @@ static int rcio_spi_probe(struct spi_device *spi)
 {
     int ret;
     spi->mode = SPI_MODE_0;
+    spi->max_speed_hz = 4000000;
 
     ret = spi_setup(spi);
 
@@ -152,9 +145,9 @@ static int rcio_spi_probe(struct spi_device *spi)
         printk(KERN_INFO "No memory\n");
         return -ENOMEM;
     }
-    
+
     ret = rcio_probe(&st);
-        if (ret < 0) {
+    if (ret < 0) {
         kfree(buffer);
         return ret;
     }
@@ -162,6 +155,19 @@ static int rcio_spi_probe(struct spi_device *spi)
     return 0;
 }
 
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(6,2,0)
+static void rcio_spi_remove(struct spi_device *spi)
+{
+    int ret = rcio_remove(&st);
+
+    if (ret < 0) {
+        dev_err(&spi->dev, "rcio_remove=%d", ret);
+        return;
+    }
+
+    kfree(buffer);
+}
+#else
 static int rcio_spi_remove(struct spi_device *spi)
 {
     int ret = rcio_remove(&st);
@@ -174,6 +180,7 @@ static int rcio_spi_remove(struct spi_device *spi)
     kfree(buffer);
     return ret;
 }
+#endif
 
 static const struct spi_device_id rcio_id[] = {
 	{ "rcio", 0 },

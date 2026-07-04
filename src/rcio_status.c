@@ -130,22 +130,33 @@ bool rcio_status_probe(struct rcio_state *state)
 
     status.init_ok = false;
 
-    if (!rcio_status_request_crc(state)) {
-        rcio_status_err(state->adapter->dev, "could not read CRC\n");
-    } else {
+    bool crc_ok = rcio_status_request_crc(state);
+    bool board_ok = rcio_status_request_board_type(state);
+    bool hash_ok = rcio_status_request_git_hash(state);
+
+    if (crc_ok) {
         rcio_status_warn(state->adapter->dev, "Firmware CRC: 0x%lx\n", status.crc);
+    } else {
+        rcio_status_err(state->adapter->dev, "Could not read CRC\n");
     }
-    
-	if (!rcio_status_request_board_type(state)) {
+
+    if (board_ok) {
+        rcio_status_warn(state->adapter->dev, "Board type: 0x%x (%s)\n",
+                         (int)status.rcio->board_type, board_names[status.rcio->board_type]);
+    } else {
         rcio_status_err(state->adapter->dev, "Could not read board type\n");
-    } else {
-        rcio_status_warn(state->adapter->dev, "Board type: 0x%x (%s)\n", (int)status.rcio->board_type, board_names[status.rcio->board_type]);
     }
-    
-	if (!rcio_status_request_git_hash(state)) {
-        rcio_status_err(state->adapter->dev, "Could not read git hash\n");
+
+    if (hash_ok) {
+        rcio_status_warn(state->adapter->dev, "Git hash: %s\n", status.git_hash);
     } else {
-        rcio_status_warn(state->adapter->dev, "Git hash: %s", status.git_hash);
+        rcio_status_err(state->adapter->dev, "Could not read git hash\n");
+    }
+
+    if (!crc_ok && !board_ok && !hash_ok) {
+        rcio_status_err(state->adapter->dev,
+                        "STM32F103 unresponsive on SPI — aborting probe\n");
+        return false;
     }
 
     return true;
