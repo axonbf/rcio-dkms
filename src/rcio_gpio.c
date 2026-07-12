@@ -346,7 +346,7 @@ int rcio_gpio_probe(struct rcio_state *state)
         rcio_gpio_warn(state->adapter->dev, "registered gpio module\n");
     }
 
-    ret = gpiochip_add(&gpiochip);
+    ret = gpiochip_add_data(&gpiochip, NULL);
 
     if (ret < 0) {
         rcio_gpio_err(state->adapter->dev, "error while adding gpiochip\n");

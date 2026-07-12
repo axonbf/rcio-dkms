@@ -45,6 +45,9 @@ struct pwm_output_rc_config {
 
 struct rcio_pwm *pwm;
 static bool pwm_registered;
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(6,12,0)
+static struct pwm_chip *rcio_pwm_chip;
+#endif
 
 static int rcio_pwm_safety_off(struct rcio_state *state);
 static int pwm_set_initial_rc_config(struct rcio_state *state);
@@ -64,10 +67,11 @@ static int rcio_pwm_create_sysfs_handle(struct rcio_state *state);
 
 
 struct rcio_pwm {
+#if LINUX_VERSION_CODE < KERNEL_VERSION(6,12,0)
     struct pwm_chip chip;
     const struct pwm_ops *ops;
+#endif
     struct rcio_state *state;
-
 };
 
 static const struct pwm_ops rcio_pwm_ops = {
@@ -75,13 +79,10 @@ static const struct pwm_ops rcio_pwm_ops = {
     .get_state = rcio_pwm_get_state,
     .request = rcio_pwm_request,
     .free = rcio_pwm_free,
+#if LINUX_VERSION_CODE < KERNEL_VERSION(6,12,0)
     .owner = THIS_MODULE,
+#endif
 };
-
-static inline struct rcio_pwm *to_rcio_pwm(struct pwm_chip *chip)
-{
-    return container_of(chip, struct rcio_pwm, chip);
-}
 
 static u16 values[RCIO_PWM_MAX_CHANNELS] = {0};
 
@@ -132,7 +133,7 @@ static void rcio_pwm_update_frequency(struct rcio_state *state, freq_update_stag
         //gcc and clang support this
     case SET_GRP1 ... SET_GRP4:
         state->register_set_byte(state, PX4IO_PAGE_SETUP, PX4IO_P_SETUP_PWM_GROUP1_RATE + stage, new_frequencies[stage]);
-        rcio_pwm_warn(pwm->chip.dev, "updated freq on grp %d to %d\n", stage, new_frequencies[stage]);
+        rcio_pwm_warn(pwm->state->adapter->dev, "updated freq on grp %d to %d\n", stage, new_frequencies[stage]);
         frequencies[stage] = new_frequencies[stage];
         break;
 
@@ -300,9 +301,13 @@ int rcio_pwm_probe(struct rcio_state *state)
     }
 
     ret =  rcio_hardware_init(state);
+    if (ret < 0) {
+        rcio_pwm_err(pwm->state->adapter->dev, "PWM hardware init failed: %d\n", ret);
+        return ret;
+    }
 
-    rcio_pwm_warn(pwm->chip.dev, "PWM probe success\n");
-    
+    rcio_pwm_warn(pwm->state->adapter->dev, "PWM probe success\n");
+
     return ret;
 }
 
@@ -311,10 +316,16 @@ int rcio_pwm_remove(struct rcio_state *state)
     if (!pwm)
         return 0;
 
-    if (pwm_registered)
+    if (pwm_registered) {
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(6,12,0)
+        pwmchip_remove(rcio_pwm_chip);
+        pwmchip_put(rcio_pwm_chip);
+        rcio_pwm_chip = NULL;
+#else
         pwmchip_remove(&pwm->chip);
-
-    kfree(pwm);
+        kfree(pwm);
+#endif
+    }
     pwm = NULL;
     pwm_registered = false;
 
@@ -325,6 +336,26 @@ static int rcio_pwm_create_sysfs_handle(struct rcio_state *state)
 {
     int ret;
 
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(6,12,0)
+    /* kernel 6.12+: pwm_chip is allocated by the framework via pwmchip_alloc.
+     * Private data (struct rcio_pwm) is at the end of the allocation,
+     * accessible via pwmchip_get_drvdata(). */
+    rcio_pwm_chip = pwmchip_alloc(state->adapter->dev,
+                                  state->pwm_channels_count,
+                                  sizeof(struct rcio_pwm));
+    if (IS_ERR(rcio_pwm_chip))
+        return PTR_ERR(rcio_pwm_chip);
+    pwm = (struct rcio_pwm *)pwmchip_get_drvdata(rcio_pwm_chip);
+    pwm->state = state;
+    rcio_pwm_chip->ops = &rcio_pwm_ops;
+    ret = pwmchip_add(rcio_pwm_chip);
+    if (ret < 0) {
+        pwmchip_put(rcio_pwm_chip);
+        rcio_pwm_chip = NULL;
+        pwm = NULL;
+        return ret;
+    }
+#else
     pwm = kzalloc(sizeof(struct rcio_pwm), GFP_KERNEL);
 
     if (!pwm)
@@ -344,6 +375,7 @@ static int rcio_pwm_create_sysfs_handle(struct rcio_state *state)
         pwm = NULL;
         return ret;
     }
+#endif
 
     pwm_registered = true;
     return 0;
@@ -392,7 +424,7 @@ static int rcio_pwm_apply(struct pwm_chip *chip, struct pwm_device *channel, con
 
         if (rcio_pwm_should_change_freq_new_way(chip, channel, pwm_group_number, new_frequency)) {
             new_frequencies[pwm_group_number] = new_frequency;
-            rcio_pwm_warn(pwm->chip.dev, "requested update on %d to %d", pwm_group_number, new_frequency);
+            rcio_pwm_warn(pwm->state->adapter->dev, "requested update on %d to %d", pwm_group_number, new_frequency);
             frequencies_update_required[pwm_group_number] = true;
         }
 
