@@ -218,7 +218,11 @@ bool rcio_pwm_update(struct rcio_state *state)
 		force_pwmzero_countdown = 0;
 	}
     
-    if (armed && (!some_freq_updated )) {
+    /* Keep refreshing the STM32 outputs every cycle once the host has started
+     * driving them (armtimeout>0). The old `armed` gate stopped refreshing when
+     * ArduPilot held a steady value (it writes on change only), starving the
+     * STM32 into its failsafe output and causing ESC signal dropouts / no arm. */
+    if ((armtimeout > 0) && (!some_freq_updated )) {
         return state->register_set(state, PX4IO_PAGE_DIRECT_PWM, 0, values, RCIO_PWM_MAX_CHANNELS);
     }
 
